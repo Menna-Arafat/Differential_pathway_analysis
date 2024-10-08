@@ -1,0 +1,164 @@
+---
+title: "Differential expression at pathway level using limma model on pathway enrichment scores to identify                differentially active pathways across groups/subgroups (pathway signature)" 
+author: "Menna Arafat"
+date: "2024-8-26"
+output: html_document
+---
+
+## create output directory
+
+```{r}
+dir.create("output")
+```
+
+## load data
+```{r}
+ES= read.csv("data/single_sample_gsea_enrichment_scores.csv")
+metadata= read.csv("data/metadata.csv")
+```
+
+
+## Apply limma for "Differential pathway analysis"
+
+```{r}
+model= model.matrix(~ 0+metadata$condition) %>% as.data.frame()
+row.names(model)= metadata$sample
+names(model)= gsub("metadata\\$condition", "", names(model))
+
+library(limma)
+fit <- lmFit(ES, model)
+fit <- eBayes(fit)
+res <- decideTests(fit, p.value=0.5) # remember to reset pvalue cut-off to 0.05
+summary(res)
+```
+
+## DE pathways
+### #differentially expressed pathways for timepoint 2 (coef=3)
+```{r}
+fit$coefficients %>% head()
+tt <- topTable(fit, coef=3, n=Inf)
+DEpwys <- rownames(tt)[tt$adj.P.Val <= 0.8] # remember to reset adjusted pvalue cut-off to 0.05
+DEpwys_es = ES[DEpwys, ]
+
+write.csv(tt, "output/differentially_expressed_pathways_limma_on_ES.csv", row.names = T)
+write.csv(DEpwys_es , "output/DEpwys_ES.csv", row.names = T)
+```
+
+## GSVA scores have higher precision for larger gene sets
+
+```{r}
+gssizes <- geneSetSizes(ES)
+plot(sqrt(gssizes), sqrt(fit$sigma), xlab="Sqrt(gene sets sizes)",
+     ylab="Sqrt(standard deviation)", las=1, pch=".", cex=3)
+```
+
+## In such a setting, we can improve the analysis of differentially expressed pathways by using the limma-trend approach (Phipson et al. 2016)
+## setting the trend parameter in the call to the eBayes() function to the vector of gene set sizes. 
+##  Key Idea Behind Limma-Trend
+##  In RNA-seq and pathway analysis, there can be a mean-variance trend—i.e.,
+##  genes or pathways with higher expression tend to have larger variances.
+##  The limma-trend approach takes this into account by allowing the prior variance estimate
+##  to depend on the mean expression of the gene or pathway, rather than assuming a constant variance for all genes.
+
+```{r}
+# fit <- eBayes(fit, trend=gssizes)
+# res <- decideTests(fit, p.value=0.01)
+# summary(res)
+```
+
+## -------------------------------------------------------------------------------
+## heatmap DE pathways
+
+```{r}
+# tt <- topTable(fit, coef=4, n=Inf)
+# DEpwys <- rownames(tt)[tt$adj.P.Val <= 0.01]
+# DEpwys_es = ES[DEpwys, ]
+```
+
+## for hierarchical clustering,to determine whether to use pearson (assume norrmally distributed data and linear relation) or spearman (assume non normally distributed data)
+
+```{r}
+DEpwys_es = ES[DEpwys, ]
+row.names(DEpwys_es)= NULL
+DEpwys_es= DEpwys_es %>% column_to_rownames("X")
+shapiro.test(as.numeric(DEpwys_es[1, ]))  #' ## p-value <= 0.05 indicative of non normal distribution 
+shapiro.test(as.numeric(DEpwys_es[, 1])) 
+
+colorLegend <- c("darkolivegreen" , "steelblue","#ADFF2F" )
+names(colorLegend) <- unique(metadata$condition)
+sample.color.map = colorLegend[metadata$condition]
+names(sample.color.map) <- metadata$sample
+
+sampleClustering <- hclust(as.dist(1-cor(as.matrix(DEpwys_es), method="spearman")), #' ## pearson #' ## spearman
+                           method="complete")
+geneSetClustering <- hclust(as.dist(1-cor(t(DEpwys_es), method="spearman")),
+                            method="complete")
+palette <- colorRampPalette(c( "lightyellow2" ,"#DFC27D" , "#FCAA0FFF", "darkred"))(256)
+
+png("output/heatmap_DE_pathsways.png", height=4100, width = 2650, res= 600)
+heatmap(as.matrix(DEpwys_es), ColSideColors=sample.color.map, xlab="samples",
+        ylab="", margins=c(2, 20),
+        col = palette ,
+        labRow=substr(gsub("_", " ", gsub("^KEGG_|^REACTOME_|^BIOCARTA_", "", rownames(DEpwys_es))), 1, 35),
+        labCol="", scale="none", Colv=as.dendrogram(sampleClustering),
+        Rowv=as.dendrogram(geneSetClustering)
+         )
+legend("right", inset = 0.001, names(colorLegend), fill=colorLegend, bg="white",
+       cex = .4, title= "Phases") #' ##  #' ## x = .01, y =9
+image.plot(zlim = range(DEpwys_es, na.rm = TRUE),
+           legend.only = TRUE, 
+           horizontal = TRUE, 
+           legend.shrink = 0.3, 
+           legend.width = 0.9,
+           legend.mar= 4.5,
+           col = palette , 
+           legend.position = c(0.5, 0.5), 
+           inset = c(-1.1, 0),
+           legend.args = list(text = "Enrichment Score (ES)", side = 3, line = .5, cex = 0.6))
+dev.off()
+```
+
+## Auxillary plots
+## volcano plot for DE pathways
+
+```{r}
+tt <- topTable(fit, coef=2, n=Inf)
+DEpwys <- rownames(tt)[tt$adj.P.Val <= 0.01] # remember to reset adjusted pvalue cut-off 
+
+
+plot(tt$logFC, -log10(tt$P.Value), pch=16, cex=1, col=grey(0.75),
+     main="", xlab="GSVA enrichment score difference", las=1,
+     ylab=expression(-log[10]~~Raw~P-value))
+abline(h=-log10(max(tt$P.Value[tt$adj.P.Val <= 0.01])),
+       col=grey(0.5), lwd=1, lty=2)
+points(tt$logFC[match(DEpwys, rownames(tt))],
+       -log10(tt$P.Value[match(DEpwys, rownames(tt))]),
+       pch=16, cex=1, col="darkred")
+text(max(tt$logFC)*0.85, -log10(max(tt$P.Value[tt$adj.P.Val <= 0.01])),
+     "1% FDR", pos=3)
+```
+
+## -------------------------------------------------------------------------------
+## heatmap enrichment scores 
+
+```{r}
+row.names(ES)= NULL
+ES= ES %>% column_to_rownames("X")
+
+heatmap_data <- scale(as.matrix(ES[1:150,]))
+
+p= Heatmap(
+  matrix = as.matrix(heatmap_data ),
+  name = "Enrichment Scores",
+  col = colorRamp2(c(-3, 0, 3), c("#9370DB", "#F7F5F4","red" )),#' ## matlab::jet.colors(200),
+  show_row_names = TRUE,
+  cluster_rows = TRUE,
+  cluster_columns = TRUE,
+  show_column_names = T
+  #' ## top_annotation  = ta
+  #' ## column_title = ""
+) 
+
+print(p)
+```
+
